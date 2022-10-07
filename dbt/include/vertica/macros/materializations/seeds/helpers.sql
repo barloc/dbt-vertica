@@ -66,20 +66,65 @@
         copy {{ this.render() }}
         ({{ cols_sql }})
         from local '{{ agate_table.original_abspath }}'
+        trailing nullcols
         delimiter ','
+        NULL AS 'NULL'
         enclosed by '"'
         skip 1
-        abort on error
-        rejected data as table {{ this.without_identifier() }}.seed_rejects;
+        abort on error;
+        -- rejected data as table {{ this.without_identifier() }}.seed_rejects;
     {% endset %}
 
     {{ return(sql) }}
 {% endmacro %}
 
 
-{# 
-  No need to implement reset_csv_table(). Syntax supported by default. 
-  No need to implement get_binding_char(). Syntax supported by default.
-  No need to implement get_batch_size(). Syntax supported by default.
-  No need to implement get_seed_column_quoted_csv(). Syntax supported by default.
-#}
+  {%- set identifier = model['alias'] -%}
+  {%- set full_refresh_mode = (should_full_refresh()) -%}
+
+  {%- set old_relation = adapter.get_relation(database=database, schema=schema, identifier=identifier) -%}
+
+  {%- set exists_as_table = (old_relation is not none and old_relation.is_table) -%}
+  {%- set exists_as_view = (old_relation is not none and old_relation.is_view) -%}
+
+  {%- set agate_table = load_agate_table() -%}
+  {%- do store_result('agate_table', response='OK', agate_table=agate_table) -%}
+
+  {{ run_hooks(pre_hooks, inside_transaction=False) }}
+
+  -- `BEGIN` happens here:
+  {{ run_hooks(pre_hooks, inside_transaction=True) }}
+
+  -- build model
+  {% set create_table_sql = "" %}
+  {% if exists_as_view %}
+    {{ exceptions.raise_compiler_error("Cannot seed to '{}', it is a view".format(old_relation)) }}
+  {% elif exists_as_table %}
+    {% set create_table_sql = reset_csv_table(model, full_refresh_mode, old_relation, agate_table) %}
+  {% else %}
+    {% set create_table_sql = create_csv_table(model, agate_table) %}
+  {% endif %}
+
+  {% set status = 'CREATE' if full_refresh_mode else 'INSERT' %}
+  {% set num_rows = (agate_table.rows | length) %}
+  {% set sql = load_csv_rows(model, agate_table) %}
+
+  {% call statement('main') %}
+    {{ create_table_sql }};
+    -- dbt seed --
+    {{ sql }}
+  {% endcall %}
+
+  {% set target_relation = this.incorporate(type='table') %}
+  {% do persist_docs(target_relation, model) %}
+
+  {{ run_hooks(post_hooks, inside_transaction=True) }}
+
+  -- `COMMIT` happens here
+  {{ adapter.commit() }}
+
+  {{ run_hooks(post_hooks, inside_transaction=False) }}
+
+  {{ return({'relations': [target_relation]}) }}
+
+{% endmaterialization %}
