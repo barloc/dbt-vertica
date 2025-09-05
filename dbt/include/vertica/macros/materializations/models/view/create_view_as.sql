@@ -10,4 +10,7 @@
   create view {{ relation }} include schema privileges as (
     {{ sql }}
   );
+  {%- if 'dbadmin' != target.username %}
+  alter view {{ relation }} owner to dbadmin;
+  {%- endif -%}
 {%- endmacro %}
